@@ -71,25 +71,89 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
 }
 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+    // todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+
+    assert!(y.shape() == x.shape());
+    assert!(w.shape().len() == 1);
+    assert!(y.shape().last() == w.shape().last());
+
+    fn dfs(
+        step: usize,
+        offset: usize,
+        y: &mut Tensor<f32>,
+        x: &Tensor<f32>,
+        w: &Tensor<f32>,
+        epsilon: f32,
+    ) {
+        if step == y.shape().len() - 1 {
+            let len = w.size();
+            let yd = unsafe { y.data_mut() };
+            let xd = x.data();
+            let wd = w.data();
+
+            let mut avg = 0.0;
+            for i in 0..len {
+                avg += xd[offset + i] * xd[offset + i];
+            }
+            avg = (avg / len as f32 + epsilon).sqrt();
+            for i in 0..len {
+                yd[offset + i] = xd[offset + i] * wd[i] / avg;
+            }
+        } else {
+            for i in 0..y.shape()[step] {
+                dfs(step + 1, offset + i * y.stride()[step], y, x, w, epsilon);
+            }
+        }
+    }
+
+    dfs(0, 0, y, x, w, epsilon);
 }
 
 // y = silu(x) * y
 // hint: this is an element-wise operation
 pub fn swiglu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
-    // let len = y.size();
-    // assert!(len == x.size());
+    let len = y.size();
+    assert!(len == x.size());
 
-    // let _y = unsafe { y.data_mut() };
-    // let _x = x.data();
+    let y = unsafe { y.data_mut() };
+    let x = x.data();
 
-    todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
+    // todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
+
+    for i in 0..len {
+        y[i] *= 1.0 / (1.0 + (-x[i]).exp()) * x[i];
+    }
 }
 
 // C = beta * C + alpha * A @ B^T
 // hint: You don't need to do an explicit transpose of B
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    // todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+
+    assert!(c.shape().len() == 2 && a.shape().len() == 2 && b.shape().len() == 2);
+    assert!(
+        c.shape().first() == a.shape().first()
+            && c.shape().last() == b.shape().first()
+            && a.shape().last() == b.shape().last()
+    );
+
+    let n = *c.shape().first().unwrap();
+    let m = *c.shape().last().unwrap();
+    let k = *a.shape().last().unwrap();
+
+    for i in 0..n {
+        for j in 0..m {
+            let d = &mut c[&[i, j]];
+            *d *= beta;
+            for l in 0..k {
+                *d += alpha * a[&[i, l]] * b[&[j, l]];
+            }
+        }
+    }
+}
+
+pub fn matmul(c: &mut Tensor<f32>, a: &Tensor<f32>, b: &Tensor<f32>) {
+    matmul_transb(c, 0.0, a, b, 1.0);
 }
 
 // Dot product of two tensors (treated as vectors)

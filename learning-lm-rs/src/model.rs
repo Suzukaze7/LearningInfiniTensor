@@ -101,17 +101,48 @@ impl Llama<f32> {
             let full_k = &mut cache.k_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
             let full_v = &mut cache.v_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
 
-            todo!("self_attention(...)");
-            todo!("down_proj matmul and add residual");
+            // todo!("self_attention(...)");
+            self_attention(
+                &mut hidden_states,
+                &mut att_scores,
+                q.reshape(&vec![seq_len, self.n_q_h * self.dqkv]),
+                full_k,
+                full_v,
+                self.n_kv_h,
+                n_groups,
+                seq_len,
+                total_seq_len,
+                self.dqkv,
+            );
+            OP::matmul_transb(
+                &mut residual,
+                1.0,
+                &hidden_states,
+                &self.params.wo[layer],
+                1.0,
+            );
 
-            todo!("mlp(...)");
+            // todo!("down_proj matmul and add residual");
+            // todo!("mlp(...)");
+
+            mlp(
+                &mut residual,
+                &mut hidden_states,
+                &mut gate_buf,
+                &mut up_buf,
+                &self.params.w_up[layer],
+                &self.params.w_down[layer],
+                &self.params.w_gate[layer],
+                &self.params.rms_ffn_w[layer],
+                self.eps,
+            );
         }
 
         // No matter what seq_len, the output is always a 1D vector of length vocab,
         // which contains the probabilities for the next token.
         let mut logits = Tensor::<f32>::default(&vec![1, self.vocab]);
         let mut hidden_states = hidden_states.slice((seq_len - 1) * self.d, &vec![1, self.d]);
-        let residual = residual.slice((seq_len - 1) * self.d, &vec![self.d]);
+        let residual = residual.slice((seq_len - 1) * self.d, &vec![1, self.d]);
 
         OP::rms_norm(
             &mut hidden_states,
@@ -132,11 +163,24 @@ impl Llama<f32> {
         top_p: f32,
         top_k: u32,
         temperature: f32,
-    ) -> Vec<u32>{
+    ) -> Vec<u32> {
         let mut result = Vec::<u32>::new();
-        
-        todo!("实现文本生成");
-        
+
+        // todo!("实现文本生成");
+        let mut cache = self.new_cache();
+        let mut input = Tensor::<u32>::new(token_ids.to_vec(), &vec![token_ids.len()]);
+        while result.len() < max_len {
+            let output = self.forward(&input, &mut cache);
+            let next_token = OP::random_sample(&output, top_p, top_k, temperature);
+
+            if next_token == self.eos_token_id {
+                break;
+            }
+
+            result.push(next_token);
+            input = Tensor::<u32>::new(vec![next_token], &vec![1]);
+        }
+
         result
     }
 }
@@ -153,7 +197,38 @@ fn self_attention(
     total_seq_len: usize,
     dqkv: usize,
 ) {
-    todo!("Implement self_attention");
+    // todo!("Implement self_attention");
+    for seq in 0..seq_len {
+        for total_seq in 0..total_seq_len {
+            for kv_h in 0..n_kv_h {
+                for group in 0..n_groups {
+                    let score = &mut att_scores[&[kv_h, group, seq, total_seq]];
+                    for d in 0..dqkv {
+                        *score += q[&[seq, kv_h * n_groups * dqkv + group * dqkv + d]]
+                            * k[&[total_seq, kv_h * dqkv + d]];
+                    }
+                    *score /= (dqkv as f32).sqrt();
+                }
+            }
+        }
+    }
+
+    OP::masked_softmax(att_scores);
+
+    for seq in 0..seq_len {
+        for group in 0..n_groups {
+            for kv_h in 0..n_kv_h {
+                for d in 0..dqkv {
+                    let weighted_sum =
+                        &mut hidden_states[&[seq, kv_h * n_groups * dqkv + group * dqkv + d]];
+                    for total_seq in 0..total_seq_len {
+                        *weighted_sum += att_scores[&[kv_h, group, seq, total_seq]]
+                            * v[&[total_seq, kv_h * dqkv + d]];
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn mlp(
@@ -167,7 +242,12 @@ fn mlp(
     rms_w: &Tensor<f32>,
     eps: f32,
 ) {
-    todo!("Implement mlp");
+    // todo!("Implement mlp");
+    OP::rms_norm(hidden_states, residual, rms_w, eps);
+    OP::matmul(gate, hidden_states, w_gate);
+    OP::matmul(up, hidden_states, w_up);
+    OP::swiglu(up, gate); // 直接将 up 替换 act，可能出错
+    OP::matmul_transb(residual, 1.0, up, w_down, 1.0);
 }
 
 #[test]
@@ -210,8 +290,8 @@ pub fn test_mlp() {
 
 #[test]
 pub fn test_load_safetensors() {
-    use std::path::PathBuf;
     use crate::tensor::float_eq;
+    use std::path::PathBuf;
     let project_dir = env!("CARGO_MANIFEST_DIR");
     let model_dir = PathBuf::from(project_dir).join("models").join("story");
     let model = Llama::from_safetensors(model_dir);
@@ -223,17 +303,55 @@ pub fn test_load_safetensors() {
     assert_eq!(model.dqkv, 16);
     assert_eq!(model.di, 384);
 
-    assert!(float_eq(&model.params.embedding_table.data()[50], &0.14453125, 1e-6));
-    assert_eq!(model.params.lm_head.data()[10], model.params.embedding_table.data()[10]);
-    assert!(float_eq(&model.params.rms_att_w[0].data()[10], &0.18652344, 1e-6));
-    assert!(float_eq(&model.params.rms_ffn_w[1].data()[10], &0.32421875, 1e-6));
-    assert!(float_eq(&model.params.rms_out_w.data()[100], &0.73046875, 1e-6));
-    assert!(float_eq(&model.params.w_down[0].data()[100], &-0.0625, 1e-6));
+    assert!(float_eq(
+        &model.params.embedding_table.data()[50],
+        &0.14453125,
+        1e-6
+    ));
+    assert_eq!(
+        model.params.lm_head.data()[10],
+        model.params.embedding_table.data()[10]
+    );
+    assert!(float_eq(
+        &model.params.rms_att_w[0].data()[10],
+        &0.18652344,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.rms_ffn_w[1].data()[10],
+        &0.32421875,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.rms_out_w.data()[100],
+        &0.73046875,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.w_down[0].data()[100],
+        &-0.0625,
+        1e-6
+    ));
     assert!(float_eq(&model.params.w_up[0].data()[100], &1.46875, 1e-6));
-    assert!(float_eq(&model.params.w_gate[1].data()[100], &0.296875, 1e-6));
-    assert!(float_eq(&model.params.wq[1].data()[100], &0.032226563, 1e-6));
-    assert!(float_eq(&model.params.wk[1].data()[100], &-0.21386719, 1e-6));
-    assert!(float_eq(&model.params.wv[0].data()[100], &0.041015625, 1e-6));
+    assert!(float_eq(
+        &model.params.w_gate[1].data()[100],
+        &0.296875,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.wq[1].data()[100],
+        &0.032226563,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.wk[1].data()[100],
+        &-0.21386719,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.wv[0].data()[100],
+        &0.041015625,
+        1e-6
+    ));
     assert!(float_eq(&model.params.wo[0].data()[100], &0.01965332, 1e-6));
-
 }
